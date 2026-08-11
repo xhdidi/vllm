@@ -28,7 +28,7 @@ class EncoderCache:
         Clear the multi-modal cache that was used during profiling,
         but no longer needed during inference.
         """
-        # NOTE: v2 encoder cache profiling skips the multi-modal cache
+        # TODO: Implement MM budget for encoder dummy run
         pass
 
     def reset_encoder_cache(self) -> None:

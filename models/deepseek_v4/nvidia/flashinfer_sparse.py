@@ -60,20 +60,6 @@ def _packed_block_span(pool: torch.Tensor) -> int:
     return block_stride // token_stride
 
 
-# Sparse MLA h_q counts accepted natively (flashinfer>=0.6.14, #3545).
-_SPARSE_MLA_SUPPORTED_Q_HEADS = (8, 16, 32, 64, 128)
-
-
-def _pad_to_supported_q_heads(num_heads: int) -> int:
-    for supported in _SPARSE_MLA_SUPPORTED_Q_HEADS:
-        if num_heads <= supported:
-            return supported
-    raise ValueError(
-        f"DeepseekV4 FlashInfer MLA Sparse does not support {num_heads} heads "
-        "(sparse MLA kernel requires h_q in {8, 16, 32, 64, 128})."
-    )
-
-
 class DeepseekV4FlashInferMLASparseBackend(DeepseekV4FlashMLABackend):
     """FlashInfer backend using the DSv4 sparse metadata/cache layout.
 
@@ -178,7 +164,13 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
 
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
-        return _pad_to_supported_q_heads(num_heads)
+        # FP8 decode kernel only supports h_q = 64 or 128.
+        if num_heads > 128:
+            raise ValueError(
+                f"DeepseekV4 FlashInfer MLA Sparse does not support {num_heads} heads "
+                "(FP8 decode kernel requires h_q in {64, 128})."
+            )
+        return 64 if num_heads <= 64 else 128
 
     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         return deep_gemm_fp8_o_proj(
@@ -553,7 +545,18 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
 
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
-        return _pad_to_supported_q_heads(num_heads)
+        if num_heads <= 16:
+            return 16
+        if num_heads <= 32:
+            return 32
+        if num_heads <= 64:
+            return 64
+        if num_heads <= 128:
+            return 128
+        raise ValueError(
+            f"DeepseekV4 FlashInfer MLA Sparse does not support {num_heads} heads "
+            "(SM120 kernel requires h_q in {16, 32, 64, 128})."
+        )
 
     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         return deep_gemm_fp8_o_proj(
@@ -745,9 +748,6 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
                         attn_metadata.block_table[:num_decodes],
                         block_size,
                         is_valid,
-                        output_buffers=self._global_topk_output_buffers(
-                            self.topk_indices_buffer[:num_decode_tokens]
-                        ),
                     )
                 )
                 extra_sparse_indices = global_indices.view(num_decode_tokens, 1, -1)
@@ -837,7 +837,6 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
                     attn_metadata.block_table,
                     block_size,
                     swa_metadata.is_valid_token[prefill_token_slice],
-                    output_buffers=self._global_topk_output_buffers(local_topk_indices),
                 )
             )
 

@@ -77,11 +77,8 @@ class HTTPVLLMWeightSyncClient:
             "update_weights", {"update_info": _json_safe_update_info(update_info)}
         )
 
-    def finish_weight_update(self, weight_version: str | None = None) -> None:
-        json = (
-            {"weight_version": weight_version} if weight_version is not None else None
-        )
-        self._post("finish_weight_update", json)
+    def finish_weight_update(self) -> None:
+        self._post("finish_weight_update")
 
 
 class RayVLLMWeightSyncClient:
@@ -111,11 +108,7 @@ class RayVLLMWeightSyncClient:
         request = WeightTransferUpdateRequest(update_info=update_info)
         ray.get([h.update_weights.remote(request) for h in self.handles])
 
-    def finish_weight_update(self, weight_version: str | None = None) -> None:
+    def finish_weight_update(self) -> None:
         import ray
 
         ray.get([h.finish_weight_update.remote() for h in self.handles])
-        if weight_version is not None:
-            ray.get(
-                [h.update_weight_version.remote(weight_version) for h in self.handles]
-            )

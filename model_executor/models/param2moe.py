@@ -32,9 +32,7 @@ from vllm.distributed import (
 )
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import (
-    FusedMoEFactory,
-)
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -327,7 +325,7 @@ class Param2MoEMoEBlock(nn.Module):
         else:
             self.shared_experts = None  # type: ignore[assignment]
 
-        self.experts = FusedMoEFactory(
+        self.experts = FusedMoE(
             shared_experts=self.shared_experts,
             num_experts=self.num_experts,
             top_k=self.top_k,
@@ -344,7 +342,7 @@ class Param2MoEMoEBlock(nn.Module):
             routed_scaling_factor=self.routed_scaling_factor,
         )
 
-    def maybe_get_fused_moe(self) -> FusedMoEFactory:
+    def maybe_get_fused_moe(self) -> FusedMoE:
         return self.experts
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:

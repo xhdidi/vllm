@@ -43,13 +43,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
-    kInt4Static,
-    kInt4Static32,
-    kInt8DynamicTensorSym,
     kInt8DynamicTokenSym,
-    kInt8Static,
     kInt8StaticChannelSym,
-    kInt8StaticTensorSym,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl
@@ -105,25 +100,15 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        # INT8 requires at least 7.5 (Turing) on CUDA. ROCm CDNA GPUs
-        # (e.g. MI2xx/MI3xx/gfx950) provide native INT8 matrix-core support and
-        # the Triton int8_w8a8 fused MoE kernel handles them.
+        # INT8 requires at least 7.5 (Turing).
         device_supports_int8 = (
             current_platform.is_cuda()
             and current_platform.has_device_capability((7, 5))
-        ) or current_platform.is_rocm()
+        )
 
         supported: list[tuple[QuantKey | None, QuantKey | None]] = [(None, None)]
         if device_supports_int8:
-            # Activations are consumed as float and quantized to int8
-            # dynamically inside the kernel, so only dynamic-activation int8
-            # schemes are supported (static-activation int8 is not).
-            supported += [
-                # per-channel weight + dynamic per-token activation
-                (kInt8StaticChannelSym, kInt8DynamicTokenSym),
-                # per-tensor weight + dynamic per-tensor activation
-                (kInt8StaticTensorSym, kInt8DynamicTensorSym),
-            ]
+            supported.append((kInt8StaticChannelSym, kInt8DynamicTokenSym))
         if current_platform.supports_fp8():
             supported += [
                 (kFp8Static128BlockSym, kFp8Dynamic128Sym),
@@ -140,7 +125,6 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             MoEActivation.SILU,
             MoEActivation.GELU,
             MoEActivation.GELU_TANH,
-            MoEActivation.SITU,
             MoEActivation.SWIGLUOAI,
             MoEActivation.SWIGLUOAI_UNINTERLEAVE,
             MoEActivation.SWIGLUSTEP,
@@ -558,44 +542,40 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
 class TritonWNA16Experts(TritonExperts):
     @staticmethod
     def _supports_current_device() -> bool:
-        return current_platform.is_cuda_alike() or current_platform.is_xpu()
+        raise NotImplementedError(
+            "TritonWNA16Experts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
-        return True
+        raise NotImplementedError(
+            "TritonWNA16Experts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
 
     @staticmethod
     def _supports_quant_scheme(
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        SUPPORTED_W = [
-            kInt4Static,
-            kInt8Static,
-            kInt4Static32,
-            # other group sizes?
-        ]
-        return weight_key in SUPPORTED_W
+        raise NotImplementedError(
+            "TritonWNA16Experts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation in [
-            MoEActivation.SILU,
-            MoEActivation.GELU,
-            MoEActivation.GELU_TANH,
-            MoEActivation.SWIGLUOAI,
-            MoEActivation.SWIGLUSTEP,
-            MoEActivation.SILU_NO_MUL,
-            MoEActivation.GELU_NO_MUL,
-            MoEActivation.GELU_TANH_NO_MUL,
-            MoEActivation.RELU2_NO_MUL,
-        ]
+        raise NotImplementedError(
+            "TritonWNA16Experts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        return not (
-            moe_parallel_config.use_fi_nvl_two_sided_kernels
-            or moe_parallel_config.use_fi_nvl_one_sided_kernels
+        raise NotImplementedError(
+            "TritonWNA16Experts is not yet used by an Oracle. "
+            "This method should not be called."
         )
 
     def apply(
@@ -618,9 +598,7 @@ class TritonWNA16Experts(TritonExperts):
     ):
         # Check constraints.
         if self.quant_config.use_int4_w4a16:
-            assert hidden_states.size(-1) // 2 == w1.size(2), (
-                f"Hidden size mismatch {hidden_states.size(-1) // 2} == {w1.size(2)}"
-            )
+            assert hidden_states.size(-1) // 2 == w1.size(2), "Hidden size mismatch"
         else:
             assert hidden_states.size(-1) == w1.size(2), (
                 f"Hidden size mismatch {hidden_states.size(-1)} != {w1.size(2)}"

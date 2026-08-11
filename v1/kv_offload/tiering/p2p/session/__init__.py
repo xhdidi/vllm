@@ -3,7 +3,6 @@
 from vllm.v1.kv_offload.tiering.p2p.session.session import (
     LoadResult,
     P2PSession,
-    SessionCloseResult,
     SessionPollResult,
     StoreResult,
 )
@@ -11,7 +10,6 @@ from vllm.v1.kv_offload.tiering.p2p.session.session import (
 __all__ = [
     "LoadResult",
     "P2PSession",
-    "SessionCloseResult",
     "SessionPollResult",
     "StoreResult",
 ]

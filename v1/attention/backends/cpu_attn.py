@@ -155,12 +155,12 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
         if self.window_size is None:
             self.window_size = -1
         self.block_size = vllm_config.cache_config.block_size
-        self.kv_cache_dtype = vllm_config.cache_config.cache_dtype
+        kv_cache_dtype_str = vllm_config.cache_config.cache_dtype
         self.isa = _get_attn_isa(
             self.dtype,
             self.block_size,
             self.head_dim,
-            self.kv_cache_dtype,
+            kv_cache_dtype_str,
         )
         self.is_cross_attention = isinstance(kv_cache_spec, CrossAttentionSpec)
         self.is_encoder_only_attention = isinstance(
@@ -234,7 +234,6 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
             isa=self.isa,
             enable_kv_split=envs.VLLM_CPU_ATTN_SPLIT_KV,
             dynamic_causal=dynamic_casual,
-            kv_cache_dtype=self.kv_cache_dtype,
         )
 
         attn_metadata = CPUAttentionMetadata(
@@ -350,11 +349,8 @@ class CPUAttentionBackendImpl(AttentionImpl):
 
         num_actual_tokens = attn_metadata.num_actual_tokens
 
-        is_encoder_attention = self.attn_type in (
-            AttentionType.ENCODER_ONLY,
-            AttentionType.ENCODER,
-        )
-        if is_encoder_attention:
+        # For encoder attention
+        if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
             # For encoder attention,
             kv_cache = attn_metadata.encoder_cache
 
@@ -365,7 +361,14 @@ class CPUAttentionBackendImpl(AttentionImpl):
         kv_cache = kv_cache.view((num_blocks, num_kv_heads, block_size * 2, -1))
         key_cache, value_cache = kv_cache.chunk(2, dim=2)
 
-        if is_encoder_attention:
+        # key and value may be None in the case of cross attention. They are
+        # calculated once based on the output from the encoder and then cached
+        # in KV cache.
+        if (
+            self.kv_sharing_target_layer_name is None
+            and key is not None
+            and value is not None
+        ):
             ops.cpu_attn_reshape_and_cache(
                 key,
                 value,

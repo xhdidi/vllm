@@ -215,7 +215,7 @@ class CompressedTensorsConfig(QuantizationConfig):
     def _add_fused_moe_to_target_scheme_map(self):  # XXXXXXXXXXXXXXXXXXXXXX
         """
         Helper function to update target_scheme_map
-        since linear layers get fused into RoutedExperts
+        since linear layers get fused into FusedMoE
         targeting 'Linear' needs to also match
         RoutedExperts modules.
         """

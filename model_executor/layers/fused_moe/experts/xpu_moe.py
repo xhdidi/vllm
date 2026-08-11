@@ -20,7 +20,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kInt4Static,
     kInt4Static32,
-    kMxfp4Dynamic,
     kMxfp4Static,
     kMxfp8Dynamic,
     kMxfp8Static,
@@ -65,16 +64,10 @@ class XPUExperts(mk.FusedMoEExpertsModular):
         )
         self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
         self.fused_moe_impl: XpuFusedMoe | None = None
-        is_xe2_or_xe3 = torch.ops._xpu_C.is_xe2_arch() or torch.ops._xpu_C.is_xe3_arch()
-        if not is_xe2_or_xe3:
-            raise NotImplementedError(
-                "XPUExperts is only supported on Intel Xe2/Xe3 GPUs"
-            )
-        self._expects_unquantized_inputs = is_xe2_or_xe3
 
     @property
     def expects_unquantized_inputs(self) -> bool:
-        return self._expects_unquantized_inputs
+        return True
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -179,7 +172,6 @@ class XPUExperts(mk.FusedMoEExpertsModular):
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            a1q_scale=a1q_scale,
         )
 
 
@@ -317,24 +309,6 @@ class XPUExpertsMxFp4(XPUExperts):
             num_dispatchers,
         )
 
-    def workspace_shapes(
-        self,
-        M: int,
-        N: int,
-        K: int,
-        topk: int,
-        global_num_experts: int,
-        local_num_experts: int,
-        expert_tokens_meta: mk.ExpertTokensMetadata | None,
-        activation: MoEActivation,
-    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        # K = a1q.size(-1). When activations are pre-quantized packed mxfp4,
-        # K is the packed hidden_size (= logical / 2); the kernel output is at
-        # logical hidden_size (2 * K). When unquantized (bf16), K is already
-        # the logical size.
-        logical_K = K if self.expects_unquantized_inputs else 2 * K
-        return (0,), (0,), (M, logical_K)
-
     @staticmethod
     def _supports_quant_scheme(
         weight_key: QuantKey | None,
@@ -342,6 +316,5 @@ class XPUExpertsMxFp4(XPUExperts):
     ) -> bool:
         SUPPORTED_W_A = [
             (kMxfp4Static, None),
-            (kMxfp4Static, kMxfp4Dynamic),
         ]
         return (weight_key, activation_key) in SUPPORTED_W_A

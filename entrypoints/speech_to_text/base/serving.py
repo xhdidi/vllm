@@ -43,7 +43,6 @@ from vllm.utils.async_utils import make_async_with_semaphore, merge_async_iterat
 
 from ..transcription.protocol import (
     TranscriptionResponse,
-    TranscriptionResponseDiarized,
     TranscriptionResponseStreamChoice,
     TranscriptionResponseVerbose,
     TranscriptionSegment,
@@ -57,9 +56,7 @@ from ..translation.protocol import (
     TranslationStreamResponse,
 )
 
-SpeechToTextResponse: TypeAlias = (
-    TranscriptionResponse | TranslationResponse | TranscriptionResponseDiarized
-)
+SpeechToTextResponse: TypeAlias = TranscriptionResponse | TranslationResponse
 SpeechToTextResponseVerbose: TypeAlias = (
     TranscriptionResponseVerbose | TranslationResponseVerbose
 )
@@ -73,7 +70,6 @@ ResponseType: TypeAlias = (
     TranscriptionResponse
     | TranslationResponse
     | TranscriptionResponseVerbose
-    | TranscriptionResponseDiarized
     | TranslationResponseVerbose
 )
 
@@ -178,7 +174,6 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 y, sr = load_audio(
                     buf,
                     sr=self.asr_config.sample_rate,
-                    mono=True,
                     max_duration_s=self.max_audio_decode_duration_s,
                 )
         except ValueError:
@@ -263,7 +258,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         request: SpeechToTextRequest,
         audio_data: bytes,
         request_id: str,
-    ) -> tuple[list[EngineInput], float, list[float]]:
+    ) -> tuple[list[EngineInput], float]:
         # Validate request
         request.language = self.model_cls.validate_language(request.language)
         request.to_language = (
@@ -281,13 +276,6 @@ class SpeechToTextBaseServing(GenerateBaseServing):
 
         # Run cpu intensive preprocess step in a separate thread pool executor.
         chunks, duration = await self._decode_and_chunk_speech_async(audio_data)
-
-        chunk_start_offsets: list[float] = [0.0]
-
-        for chunk in chunks[:-1]:
-            chunk_start_offsets.append(
-                chunk_start_offsets[-1] + chunk.shape[-1] / self.asr_config.sample_rate
-            )
 
         if request.language is None and getattr(
             self.model_cls, "supports_explicit_language_detection", False
@@ -318,7 +306,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
 
         engine_inputs = await self.renderer.render_cmpl_async(parsed_prompts)
 
-        return engine_inputs, duration, chunk_start_offsets
+        return engine_inputs, duration
 
     def _preprocess_verbose_prompt(self, prompt: EncoderDecoderDictPrompt):
         dec_prompt = prompt["decoder_prompt"]
@@ -403,7 +391,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                     SpeechToTextSegment,
                     segment_class(
                         id=len(segments),
-                        seek=int(start_time),
+                        seek=start_time,
                         start=start_time + BASE_OFFSET * start_timestamp,
                         end=start_time + BASE_OFFSET * end_timestamp,
                         temperature=request.temperature,
@@ -453,15 +441,10 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         if self.engine_client.errored:
             raise self.engine_client.dead_error
 
-        if request.response_format not in [
-            "text",
-            "json",
-            "verbose_json",
-            "diarized_json",
-        ]:
+        if request.response_format not in ["text", "json", "verbose_json"]:
             return self.create_error_response(
                 "Currently only support response_format: "
-                "`text`, `json`, `verbose_json` or `diarized_json`"
+                "`text`, `json` or `verbose_json`"
             )
 
         if (
@@ -472,20 +455,9 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 f"Currently do not support verbose_json for {request.model}"
             )
 
-        if (
-            request.response_format == "diarized_json"
-            and not self.model_cls.supports_diarized_transcription
-        ):
+        if request.response_format == "verbose_json" and request.stream:
             return self.create_error_response(
-                f"Currently do not support diarized_json for {request.model}"
-            )
-
-        if (
-            request.response_format in {"verbose_json", "diarized_json"}
-            and request.stream
-        ):
-            return self.create_error_response(
-                f"{request.response_format} format doesn't support streaming case"
+                "verbose_json format doesn't support streaming case"
             )
         request_id = f"{self.task_type}-{self._base_request_id(raw_request)}"
 
@@ -495,11 +467,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
 
         lora_request = self._maybe_get_adapters(request)
 
-        (
-            engine_inputs,
-            duration_s,
-            chunk_start_offsets,
-        ) = await self._preprocess_speech_to_text(
+        engine_inputs, duration_s = await self._preprocess_speech_to_text(
             request=request,
             audio_data=audio_data,
             request_id=request_id,
@@ -619,10 +587,11 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 assert len(list_result_generator) == 1, (
                     "`max_audio_clip_s` is set to None, audio cannot be chunked"
                 )
-            assert len(chunk_start_offsets) == len(list_result_generator)
             result_generator = merge_async_iterators(*list_result_generator)
             async for idx, op in result_generator:
-                start_time = chunk_start_offsets[idx]
+                start_time = (
+                    float(idx * chunk_size_in_s) if chunk_size_in_s is not None else 0.0
+                )
                 if request.response_format == "verbose_json":
                     assert op.outputs[0].logprobs
                     segments: list[SpeechToTextSegment] = self._get_verbose_segments(
@@ -655,33 +624,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                     # rounded up as per openAI specs
                     "seconds": int(math.ceil(duration_s)),
                 }
-                if request.response_format == "diarized_json":
-                    diarized_segments = self.model_cls.parse_diarized_transcript(text)
-                    if not diarized_segments:
-                        return self.create_error_response(
-                            "Model output did not contain a valid diarized transcript"
-                        )
-                    final_response = cast(
-                        T,
-                        TranscriptionResponseDiarized(
-                            duration=duration_s,
-                            text=separator.join(
-                                segment.text for segment in diarized_segments
-                            ),
-                            segments=[
-                                {
-                                    "id": f"seg_{index}",
-                                    "start": segment.start,
-                                    "end": segment.end,
-                                    "text": segment.text,
-                                    "speaker": segment.speaker,
-                                }
-                                for index, segment in enumerate(diarized_segments)
-                            ],
-                            usage=usage,
-                        ),
-                    )
-                elif request.response_format != "verbose_json":
+                if request.response_format != "verbose_json":
                     final_response = cast(
                         T, TranscriptionResponse(text=text, usage=usage)
                     )
@@ -691,7 +634,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                         TranscriptionResponseVerbose(
                             text=text,
                             language=request.language,
-                            duration=duration_s,
+                            duration=str(duration_s),
                             segments=total_segments,
                         ),
                     )
@@ -705,7 +648,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                         TranslationResponseVerbose(
                             text=text,
                             language=request.language,
-                            duration=duration_s,
+                            duration=str(duration_s),
                             segments=total_segments,
                         ),
                     )

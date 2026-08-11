@@ -22,8 +22,6 @@ class GptOssToolParser(ToolParser):
     capability declaration via HarmonyParser.tool_parser_cls.
     """
 
-    structural_tag_model = "harmony"
-
     def __init__(self, tokenizer: "TokenizerLike", tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)
 

@@ -19,13 +19,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple
 
-from vllm.distributed.kv_events import (
-    MEDIUM_CPU,
-    MEDIUM_STORAGE,
-    BlockRemoved,
-    BlockStored,
-    KVCacheEvent,
-)
+from vllm.distributed.kv_events import BlockRemoved, BlockStored, KVCacheEvent
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 from vllm.v1.kv_cache_interface import (
@@ -34,7 +28,6 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_sliding_window,
 )
 from vllm.v1.kv_offload.base import (
-    Medium,
     OffloadingEvent,
     OffloadingKVEventsConfig,
     OffloadKey,
@@ -49,11 +42,6 @@ if TYPE_CHECKING:
     )
 
 logger = init_logger(__name__)
-
-_MEDIUM_TO_EVENT_STR: dict[Medium, str] = {
-    Medium.CPU: MEDIUM_CPU,
-    Medium.STORAGE: MEDIUM_STORAGE,
-}
 
 
 class OffloadingEventGroupSpec(NamedTuple):
@@ -73,9 +61,9 @@ def get_offloading_event_group_spec(
 
 @dataclass(slots=True)
 class _OffloadEventMetadata:
-    """BlockStored payload snapshot for one OffloadKey, captured while the
-    Request is available and kept until the matching eviction event. ``medium``
-    is forwarded from the OffloadingEvent."""
+    """BlockStored payload snapshot for one OffloadKey, captured at store
+    time and kept until the matching eviction event. ``medium`` is forwarded
+    from the OffloadingEvent."""
 
     # The chunk's constituent block hashes; the last one is the OffloadKey.
     block_hashes: tuple[BlockHash, ...]
@@ -93,11 +81,10 @@ class _OffloadEventMetadata:
 class OffloadingEventsTracker:
     """Tracks offloaded chunks' KV event payloads from store to eviction.
 
-    The scheduler calls :meth:`record_store` from ``_build_store_jobs`` and
-    :meth:`record_lookup` for ready primary-tier hits while the ``Request`` is
-    available. Deferred and missing lookups add no state. Under the connector's
-    supported success-only transfer model, entries follow primary allocations
-    until CPU removal translation or :meth:`reset`.
+    The scheduler calls :meth:`record_store` from ``_build_store_jobs``
+    while the ``Request`` is available, and routes the manager's raw
+    :class:`OffloadingEvent` stream through :meth:`take_events`. All state
+    is bounded by the CPU pool capacity and cleared by :meth:`reset`.
     """
 
     def __init__(self, config: OffloadingKVEventsConfig):
@@ -106,7 +93,8 @@ class OffloadingEventsTracker:
             config.enable_kv_cache_events and config.self_describing_kv_events
         )
 
-        # OffloadKey -> payload snapshot, kept until CPU removal or reset.
+        # OffloadKey -> payload snapshot, kept until the eviction event so
+        # BlockRemoved can fan out. Bounded: one entry per offloaded chunk.
         self._pending_event_metadata: dict[OffloadKey, _OffloadEventMetadata] = {}
 
     def record_store(
@@ -127,23 +115,6 @@ class OffloadingEventsTracker:
             return
         meta = self._build_event_metadata(req, group_config, chunk_idx)
         self._pending_event_metadata[offload_key] = meta
-
-    def record_lookup(
-        self,
-        req: Request,
-        group_config: "GroupOffloadConfig",
-        chunk_idx: int,
-        offload_key: OffloadKey,
-    ) -> None:
-        """Snapshot metadata for a ready primary-tier lookup hit."""
-        if not self.self_describing_enabled:
-            return
-        if group_config.sliding_window_size_in_chunks is not None:
-            return
-        if offload_key not in self._pending_event_metadata:
-            self._pending_event_metadata[offload_key] = self._build_event_metadata(
-                req, group_config, chunk_idx
-            )
 
     def take_events(self, events: Iterable[OffloadingEvent]) -> Iterable[KVCacheEvent]:
         """Translate raw OffloadingEvents into self-describing KV events.
@@ -194,7 +165,7 @@ class OffloadingEventsTracker:
         assert len(chunk_hashes) == hbf
 
         if group_config.sliding_window_size_in_chunks is not None:
-            # The recording methods filter these out before calling this helper.
+            # record_store filters these out before calling this helper.
             raise AssertionError("self-describing events only support full attention")
 
         parent_block_hash: BlockHash | None
@@ -230,7 +201,7 @@ class OffloadingEventsTracker:
     def _placeholder_stored(
         self,
         key: OffloadKey,
-        medium: Medium,
+        medium: str,
         locality: str | None,
     ) -> BlockStored:
         return BlockStored(
@@ -241,7 +212,7 @@ class OffloadingEventsTracker:
             token_ids=[],
             lora_id=None,
             block_size=0,
-            medium=_MEDIUM_TO_EVENT_STR[medium],
+            medium=medium,
             lora_name=None,
             group_idx=get_offload_group_idx(key),
             locality=locality,
@@ -261,8 +232,7 @@ class OffloadingEventsTracker:
                         "OffloadingEventsTracker: no event metadata for "
                         "offload key during BlockStored emission; emitting a "
                         "placeholder payload. Expected for non-full-attention "
-                        "groups and promotions not observed as a primary-tier "
-                        "hit before translation."
+                        "groups; otherwise indicates a missing populate path."
                     )
                 yield self._placeholder_stored(key, event.medium, locality)
                 continue
@@ -279,7 +249,7 @@ class OffloadingEventsTracker:
                 token_ids=list(meta.token_ids),
                 block_size=meta.block_size,
                 lora_id=meta.lora_id,
-                medium=_MEDIUM_TO_EVENT_STR[event.medium],
+                medium=event.medium,
                 lora_name=meta.lora_name,
                 extra_keys=(
                     list(meta.extra_keys) if meta.extra_keys is not None else None
@@ -320,7 +290,7 @@ class OffloadingEventsTracker:
         for group_idx, hashes in by_group.items():
             yield BlockRemoved(
                 block_hashes=hashes,
-                medium=_MEDIUM_TO_EVENT_STR[event.medium],
+                medium=event.medium,
                 group_idx=group_idx,
                 locality=locality,
             )

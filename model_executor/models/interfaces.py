@@ -11,7 +11,6 @@ from collections.abc import (
     Sequence,
 )
 from contextlib import ExitStack, contextmanager, nullcontext
-from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -42,7 +41,6 @@ if TYPE_CHECKING:
         SpeechToTextParams,
         VllmConfig,
     )
-    from vllm.config.multimodal import VideoPruningMethod
     from vllm.inputs import PromptType, TokensPrompt
     from vllm.lora.model_manager import LoRAModelManager
     from vllm.model_executor.layers.fused_moe import MoERunner
@@ -70,16 +68,6 @@ The output embeddings must be one of the following formats:
     each input multimodal data item (e.g, image).
 - A single 3D tensor, with the batch dimension grouping the 2D tensors.
 """
-
-
-@dataclass(frozen=True, slots=True)
-class DiarizedTranscriptionSegment:
-    """A timestamped, speaker-attributed segment produced by an ASR model."""
-
-    start: float
-    end: float
-    speaker: str
-    text: str
 
 
 class StreamingTranscriptionPostProcessor:
@@ -435,13 +423,6 @@ class SupportsMultiModalPruning(Protocol):
     """
 
     supports_multimodal_pruning: ClassVar[Literal[True]] = True
-
-    supported_video_pruning_methods: ClassVar[tuple["VideoPruningMethod", ...]] = (
-        "evs",
-    )
-    """Video pruning methods (as reported by
-    `MultiModalConfig.get_video_pruning_spec`) implemented by this model.
-    Models supporting methods beyond EVS should override this."""
 
     def recompute_mrope_positions(
         self,
@@ -1004,31 +985,6 @@ def supports_mamba_prefix_caching(
 
 
 @runtime_checkable
-class SupportsReplaySSM(Protocol):
-    """The interface for models whose Mamba2 layers support ReplaySSM cached
-    standard decode.
-
-    This is currently experimental.
-    """
-
-    supports_replayssm: ClassVar[Literal[True]] = True
-
-
-@overload
-def supports_replayssm(model: object) -> TypeIs[SupportsReplaySSM]: ...
-
-
-@overload
-def supports_replayssm(model: type[object]) -> TypeIs[type[SupportsReplaySSM]]: ...
-
-
-def supports_replayssm(
-    model: type[object] | object,
-) -> TypeIs[type[SupportsReplaySSM]] | TypeIs[SupportsReplaySSM]:
-    return getattr(model, "supports_replayssm", False)
-
-
-@runtime_checkable
 class SupportsCrossEncoding(Protocol):
     """The interface required for all models that support cross encoding."""
 
@@ -1144,9 +1100,6 @@ class SupportsTranscription(Protocol):
     Enables the segment timestamp option for supported models by setting this to `True`.
     """
 
-    supports_diarized_transcription: ClassVar[bool] = False
-    """Enables the ``diarized_json`` response format for the model."""
-
     supports_explicit_language_detection: ClassVar[bool] = False
     """
     Transcription models that require an explicit language detection step
@@ -1251,15 +1204,6 @@ class SupportsTranscription(Protocol):
             Cleaned transcription text.
         """
         return text
-
-    @classmethod
-    def parse_diarized_transcript(cls, text: str) -> list[DiarizedTranscriptionSegment]:
-        """Parse the model-specific diarized transcript format.
-
-        Only models that set ``supports_diarized_transcription`` must override
-        this method.
-        """
-        raise NotImplementedError
 
     @classmethod
     def get_streaming_post_processor_cls(
@@ -1407,7 +1351,7 @@ class EagleModelMixin:
         aux_hidden_states: list[torch.Tensor],
         layer_idx: int,
         hidden_states: torch.Tensor,
-        residual: torch.Tensor | None,
+        residual: torch.Tensor,
     ) -> list[torch.Tensor]:
         if layer_idx in self.aux_hidden_state_layers:
             value = hidden_states + residual if residual is not None else hidden_states
@@ -1696,12 +1640,13 @@ class SupportsEncoderCudaGraph(Protocol):
 
     def postprocess_encoder_output(
         self,
-        outputs: dict[str, torch.Tensor],
+        output: torch.Tensor,
         indices: list[int],
         per_item_out_tokens: list[int],
         dest: dict[int, torch.Tensor] | list[torch.Tensor | None],
         clone: bool = False,
         batch_mm_kwargs: dict[str, Any] | None = None,
+        local_output: torch.Tensor | None = None,
     ) -> None:
         """
         Post-process encoder output, directly call scatter_output_slices by default.
@@ -1713,9 +1658,7 @@ class SupportsEncoderCudaGraph(Protocol):
         """
         from vllm.model_executor.models.utils import scatter_output_slices
 
-        scatter_output_slices(
-            outputs["default"], indices, per_item_out_tokens, dest, clone
-        )
+        scatter_output_slices(output, indices, per_item_out_tokens, dest, clone)
 
     def prepare_encoder_cudagraph_capture_inputs(
         self,

@@ -1678,9 +1678,9 @@ class MooncakeConnectorWorker:
                 conv, _ = cache_or_caches
                 cache_list = [conv]
             else:
-                # K and V are packed into one blocks-first tensor per layer,
-                # so each layer registers as a single region.
-                cache_list = [cache_or_caches]
+                cache_list = self.transfer_topo.get_transfer_cache_regions(
+                    cache_or_caches, layer_spec
+                )
 
             logger.debug(
                 "registering layer %s with %d cache tensor(s)",

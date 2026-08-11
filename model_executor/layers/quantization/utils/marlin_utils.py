@@ -12,7 +12,6 @@ from vllm import _custom_ops as ops
 from vllm.distributed.utils import verify_group_size_divides_partition
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import RoutedExperts
-from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
@@ -352,12 +351,10 @@ def marlin_moe_padded_intermediate(intermediate_size: int, group_size: int = -1)
     return padded
 
 
-def check_moe_marlin_supports_config(
-    config: FusedMoEConfig,
-    group_size: int,
-    allow_tile_padding: bool = False,
+def check_moe_marlin_supports_layer(
+    layer: RoutedExperts, group_size: int, allow_tile_padding: bool = False
 ) -> bool:
-    """Whether the fused MoE Marlin kernel supports ``config``.
+    """Whether the fused MoE Marlin kernel supports ``layer``.
 
     Callers without act-order may pass ``allow_tile_padding=True``: a
     tile-misaligned intermediate size is then zero-padded to a valid thread
@@ -367,11 +364,15 @@ def check_moe_marlin_supports_config(
     """
     if current_platform.is_rocm():
         return False
-    hidden_size = config.hidden_dim
+    hidden_size = layer.hidden_size
     # The layer has not rounded intermediate_size yet; use the stable unpadded
     # size. gate-up needs n=2*intermediate % 128, down needs k=intermediate % 64.
-    intermediate_size_per_partition = config.intermediate_size_per_partition_unpadded
+    intermediate_size_per_partition = (
+        layer.moe_config.intermediate_size_per_partition_unpadded
+    )
     assert intermediate_size_per_partition is not None
+    # apply_router_weight_on_input is not supported for moe marlin
+    supports_router_weight = not layer.apply_router_weight_on_input
 
     if allow_tile_padding:
         supports_shape = hidden_size % 128 == 0 and (
@@ -383,17 +384,7 @@ def check_moe_marlin_supports_config(
             and intermediate_size_per_partition % max(64, group_size) == 0
         )
     supports_group_size = group_size in [-1, 32, 64, 128]
-    return supports_shape and supports_group_size
-
-
-def check_moe_marlin_supports_layer(
-    layer: RoutedExperts,
-    group_size: int,
-    allow_tile_padding: bool = False,
-) -> bool:
-    return check_moe_marlin_supports_config(
-        layer.moe_config, group_size, allow_tile_padding
-    )
+    return supports_shape and supports_group_size and supports_router_weight
 
 
 def marlin_moe_intermediate_size(w1_packed: torch.Tensor, w2_packed: torch.Tensor):
@@ -406,31 +397,14 @@ def marlin_moe_intermediate_size(w1_packed: torch.Tensor, w2_packed: torch.Tenso
 
 
 def marlin_make_workspace_new(
-    device: torch.device,
-    max_blocks_per_sm: int = 1,
-    existing: torch.Tensor | None = None,
+    device: torch.device, max_blocks_per_sm: int = 1
 ) -> torch.Tensor:
     # In the new marlin kernel, we use the num of threadblocks as workspace
     # size. The num of threadblocks is sms_count * max_blocks_per_sm.
     sms = num_compute_units(device.index)
-    size = sms * max_blocks_per_sm
-    # On weight reload, reuse the existing storage so the workspace address
-    # captured by CUDA graphs stays valid.
-    if existing is not None:
-        if (
-            existing.device != device
-            or existing.dtype != torch.int
-            or existing.numel() != size
-        ):
-            raise ValueError(
-                f"Existing Marlin workspace is incompatible "
-                f"(device={existing.device}, dtype={existing.dtype}, "
-                f"numel={existing.numel()}; expected device={device}, "
-                f"dtype={torch.int}, numel={size}). Reload must reuse the "
-                f"workspace storage captured by CUDA graphs."
-            )
-        return existing.zero_()
-    return torch.zeros(size, dtype=torch.int, device=device, requires_grad=False)
+    return torch.zeros(
+        sms * max_blocks_per_sm, dtype=torch.int, device=device, requires_grad=False
+    )
 
 
 def marlin_is_k_full(act_order: bool, is_row_parallel: bool) -> bool:

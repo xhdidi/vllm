@@ -698,12 +698,9 @@ class HunYuanVLDummyInputsBuilder(BaseDummyInputsBuilder[HunYuanVLProcessingInfo
         num_images = mm_counts.get("image", 0)
 
         hf_processor = self.info.get_hf_processor(typ=HunYuanVLProcessor)
-        image_placeholder = (
-            f"{hf_processor.image_start_token}{hf_processor.image_token}"
-            f"{hf_processor.image_end_token}"
-        )
+        image_token: str = hf_processor.image_token
 
-        return image_placeholder * num_images
+        return image_token * num_images
 
     def get_dummy_mm_data(
         self,
@@ -782,11 +779,7 @@ class HunYuanVLMultiModalProcessor(BaseMultiModalProcessor[HunYuanVLProcessingIn
         return [
             PromptReplacement(
                 modality=modality,
-                target=[
-                    token_ids[f"{modality}_start"],
-                    token_ids[modality],
-                    token_ids[f"{modality}_end"],
-                ],
+                target=[token_ids[modality]],
                 replacement=partial(get_replacement_hunyuan_vl, modality=modality),
             )
             for modality in ("image",)

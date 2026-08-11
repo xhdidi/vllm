@@ -39,7 +39,9 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoEFactory
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoE,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
@@ -121,7 +123,7 @@ class MixtralMoE(nn.Module):
             prefix=f"{prefix}.gate",
         )
 
-        self.experts = FusedMoEFactory(
+        self.experts = FusedMoE(
             num_experts=num_experts,
             top_k=top_k,
             hidden_size=hidden_size,

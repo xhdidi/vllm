@@ -81,7 +81,7 @@ class ExaoneMoeMultiTokenPredictor(nn.Module):
                 vllm_config.model_config.hf_config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.layers.{idx}",
-                is_mtp=True,
+                mtp_layer=True,
             )
             for idx in range(self.num_mtp_layers)
         )

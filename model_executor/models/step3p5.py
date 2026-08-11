@@ -24,7 +24,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul, SwigluStepAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoEFactory,
+    FusedMoE,
     MoERunner,
     fused_moe_make_expert_params_mapping,
 )
@@ -271,11 +271,11 @@ class Step3p5Attention(nn.Module):
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         # Add qk-norm inline similar to Qwen3 MOE attention
         q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
-        q_by_head = self.q_norm(q_by_head)
+        q_by_head = self.q_norm(q_by_head.contiguous())
         q = q_by_head.view(q.shape)
 
         k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim)
-        k_by_head = self.k_norm(k_by_head)
+        k_by_head = self.k_norm(k_by_head.contiguous())
         k = k_by_head.view(k.shape)
         if self.use_rope:
             q, k = self.rotary_emb(positions, q, k)
@@ -376,7 +376,7 @@ class FusedMoEBlock(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.share_expert",
         )
-        self.experts = FusedMoEFactory(
+        self.experts = FusedMoE(
             shared_experts=self.share_expert,
             gate=self.gate,
             num_experts=config.moe_num_experts,
@@ -404,7 +404,7 @@ class FusedMoEBlock(nn.Module):
                 hidden_states=hidden_states, router_logits=hidden_states
             )
         else:
-            # TODO(bnell): this gate could be moved into the MoERunner?
+            # TODO(bnell): this gate could be moved into the FusedMoE?
             router_logits, _ = self.gate(hidden_states)
             final_hidden_states = self.experts(
                 hidden_states=hidden_states, router_logits=router_logits

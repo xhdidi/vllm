@@ -366,20 +366,6 @@ class VideoProcessorItems(ProcessorBatchItems[HfVideoItem | None]):
 
         self.metadata = metadata
 
-    def _unwrap(self, item: Any) -> Any:
-        if isinstance(item, tuple):
-            frames, metadata = item
-            return super()._unwrap(frames), metadata
-        return super()._unwrap(item)
-
-    def get_item_for_hash(self, index: int) -> Any:
-        item = self.data[index]
-        if isinstance(item, MediaWithBytes) and isinstance(self.metadata, list):
-            metadata = self.metadata[index]
-            if metadata is not None:
-                return item, metadata
-        return item
-
     def get_num_frames(self, item_idx: int) -> int:
         video = self.get(item_idx)
         if video is None:
@@ -566,10 +552,7 @@ class MultiModalDataParser:
     def _get_video_with_metadata(
         self,
         video: VideoItem,
-    ) -> tuple[np.ndarray | MediaWithBytes[np.ndarray], dict[str, Any] | None]:
-        if isinstance(video, MediaWithBytes):
-            new_video, metadata = self._get_video_with_metadata(video.media)
-            return MediaWithBytes(new_video, video.original_bytes), metadata
+    ) -> tuple[np.ndarray, dict[str, Any] | None]:
         if isinstance(video, tuple):
             return video
         if isinstance(video, list):
@@ -670,11 +653,7 @@ class MultiModalDataParser:
         else:
             data_items = data  # type: ignore[assignment]
 
-        new_videos = list[
-            np.ndarray
-            | MediaWithBytes[np.ndarray]
-            | tuple[np.ndarray | MediaWithBytes[np.ndarray], dict[str, Any]]
-        ]()
+        new_videos = list[tuple[np.ndarray, dict[str, Any] | None]]()
         metadata_lst: list[dict[str, Any] | None] = []
         for data_item in data_items:
             video, metadata = self._get_video_with_metadata(data_item)
@@ -685,9 +664,12 @@ class MultiModalDataParser:
                         "Please check your video input in `multi_modal_data`"
                     )
                 new_videos.append((video, metadata))
+                metadata_lst.append(metadata)
             else:
                 new_videos.append(video)
-            metadata_lst.append(metadata)
+
+        if not self.video_needs_metadata:
+            metadata = None
 
         return VideoProcessorItems(new_videos, metadata=metadata_lst)
 

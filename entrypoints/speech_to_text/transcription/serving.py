@@ -18,7 +18,6 @@ from ..base.serving import SpeechToTextBaseServing
 from .protocol import (
     TranscriptionRequest,
     TranscriptionResponse,
-    TranscriptionResponseDiarized,
     TranscriptionResponseStreamChoice,
     TranscriptionResponseVerbose,
     TranscriptionStreamResponse,
@@ -56,7 +55,6 @@ class OpenAIServingTranscription(SpeechToTextBaseServing):
     ) -> (
         TranscriptionResponse
         | TranscriptionResponseVerbose
-        | TranscriptionResponseDiarized
         | AsyncGenerator[str, None]
         | ErrorResponse
     ):
@@ -72,8 +70,6 @@ class OpenAIServingTranscription(SpeechToTextBaseServing):
             response_class=(
                 TranscriptionResponseVerbose
                 if request.response_format == "verbose_json"
-                else TranscriptionResponseDiarized
-                if request.response_format == "diarized_json"
                 else TranscriptionResponse
             ),
             stream_generator_method=self.transcription_stream_generator,

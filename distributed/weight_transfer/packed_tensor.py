@@ -10,7 +10,8 @@ from typing import Any
 import torch
 from torch.multiprocessing.reductions import reduce_tensor
 
-# Default values for packed tensor transfer.
+# Default values for packed tensor configuration.
+# These are imported by NCCLWeightTransferUpdateInfo and trainer_send_weights.
 DEFAULT_PACKED_BUFFER_SIZE_BYTES = 1024 * 1024 * 1024  # 1GB
 DEFAULT_PACKED_NUM_BUFFERS = 2
 

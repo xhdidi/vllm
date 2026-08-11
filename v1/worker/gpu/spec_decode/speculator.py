@@ -4,7 +4,6 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from typing import Any
 
-import numpy as np
 import torch
 import torch.nn as nn
 
@@ -52,7 +51,7 @@ class BaseSpeculator(ABC):
         num_rejected: torch.Tensor,
         # [max_num_reqs]
         last_sampled: torch.Tensor,
-        # [num_prefill_lookahead, max_num_reqs]
+        # [max_num_reqs]
         next_prefill_tokens: torch.Tensor,
         # [max_num_reqs]
         temperature: torch.Tensor,
@@ -211,45 +210,20 @@ class DraftModelSpeculator(BaseSpeculator):
         num_reqs: int,
         num_reqs_padded: int,
         num_tokens_padded: int,
-        seq_lens_cpu_upper_bound: torch.Tensor,
-        step: int,
         num_query_per_req: int = 1,
         causal: bool | Mapping[int, bool] = True,
-        query_start_loc_np: np.ndarray | None = None,
     ) -> dict[str, Any] | None:
-        if query_start_loc_np is not None:
-            # Non-uniform query layout (e.g. multi-module MTP's mixed
-            # prefill/decode queries); num_query_per_req is ignored.
-            query_start_loc_cpu = torch.empty(num_reqs_padded + 1, dtype=torch.int32)
-            query_start_loc_cpu[: num_reqs + 1] = torch.from_numpy(
-                query_start_loc_np[: num_reqs + 1]
-            )
-            query_start_loc_cpu[num_reqs:] = query_start_loc_cpu[num_reqs]
-            max_query_len = int(
-                (query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).max()
-            )
-        else:
-            # Uniform query: query_start_loc[i] = min(i, num_reqs) * num_query_per_req.
-            # Clamp keeps the series non-decreasing past num_reqs, which some
-            # attention backends require.
-            query_start_loc_cpu = (
-                torch.clamp(self.arange[: num_reqs_padded + 1], max=num_reqs)
-                * num_query_per_req
-            )
-            max_query_len = num_query_per_req
+        # Uniform query: query_start_loc[i] = min(i, num_reqs) * num_query_per_req.
+        # Clamp keeps the series non-decreasing past num_reqs, which some
+        # attention backends require.
+        query_start_loc_cpu = (
+            torch.clamp(self.arange[: num_reqs_padded + 1], max=num_reqs)
+            * num_query_per_req
+        )
         block_tables = [
             x[:num_reqs_padded] for x in self.block_tables.input_block_tables
         ]
         slot_mappings = self.block_tables.slot_mappings[:, :num_tokens_padded]
-        draft_seq_lens_cpu_upper_bound = torch.zeros(
-            num_reqs_padded, dtype=torch.int32, device="cpu"
-        )
-        torch.add(
-            seq_lens_cpu_upper_bound[:num_reqs],
-            step,
-            out=draft_seq_lens_cpu_upper_bound[:num_reqs],
-        )
-        draft_seq_lens_cpu_upper_bound[:num_reqs].clamp_(max=self.max_model_len)
         attn_metadata = build_attn_metadata(
             attn_groups=self.attn_groups,
             num_reqs=num_reqs_padded,
@@ -258,14 +232,13 @@ class DraftModelSpeculator(BaseSpeculator):
                 : num_reqs_padded + 1
             ],
             query_start_loc_cpu=query_start_loc_cpu,
-            max_query_len=max_query_len,
+            max_query_len=num_query_per_req,
             seq_lens=self.input_buffers.seq_lens[:num_reqs_padded],
             max_seq_len=self.draft_max_seq_len,
             block_tables=block_tables,
             slot_mappings=slot_mappings,
             kv_cache_config=self.kv_cache_config,
             causal=causal,
-            seq_lens_cpu_upper_bound=draft_seq_lens_cpu_upper_bound,
         )
         return attn_metadata
 
@@ -340,6 +313,7 @@ class DraftModelSpeculator(BaseSpeculator):
         self.temperature.copy_(temperature)
         self.seeds.copy_(seeds)
         self.idx_mapping[:num_reqs].copy_(idx_mapping)
-        # idx_mapping for CG padded requests points to -1, which is ignored
-        # during sampling to prevent writing stale values to draft logits.
-        self.idx_mapping[num_reqs:].fill_(-1)
+        if self.draft_logits is not None:
+            # idx_mapping for CG padded requests points to -1, which is ignored
+            # during sampling to prevent writing stale values to draft logits.
+            self.idx_mapping[num_reqs:].fill_(-1)

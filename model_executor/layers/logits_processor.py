@@ -7,6 +7,7 @@ import torch.nn.functional as F
 
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (
+    get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
     tensor_model_parallel_gather,
 )
@@ -144,8 +145,7 @@ class LogitsProcessor(PluggableLayer):
         logits = self._apply_head(lm_head, hidden_states, embedding_bias)
 
         # Gather logits for TP
-        if lm_head.tp_size > 1:
-            logits = self._gather_logits(logits)
+        logits = self._gather_logits(logits)
 
         # Remove paddings in vocab (if any).
         if logits is not None:
@@ -169,7 +169,7 @@ class LogitsProcessor(PluggableLayer):
                 "The local argmax reduction optimization is not supported for "
                 "non-positive logit scaling factors."
             )
-        tp_size = lm_head.tp_size
+        tp_size = get_tensor_model_parallel_world_size()
 
         logits = self._apply_head(lm_head, hidden_states, embedding_bias)
         if self.soft_cap is not None:
