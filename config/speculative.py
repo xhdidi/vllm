@@ -235,6 +235,10 @@ class SpeculativeConfig:
     synthetic_acceptance_rates. Only valid when rejection_sample_method is 'synthetic'.
     Mutually exclusive with synthetic_acceptance_rates."""
 
+    enable_adaptive_verification: bool = False
+    """Whether to adaptively size the draft-verification budget from per-request
+    confidence. Currently only supported for method="dspark"."""
+
     @staticmethod
     def _acceptance_length_to_rates(length: float, n: int) -> list[float]:
         """Mean acceptance length to unconditional per-position rates, using
@@ -941,6 +945,9 @@ class SpeculativeConfig:
                     self.draft_model_config.hf_config.architectures = [
                         "DSparkDraftModel"
                     ]
+                    self.draft_model_config.quantization = (
+                        self.target_model_config.quantization
+                    )
                     self.update_arch_()
                 elif (
                     self.method == "dspark"
@@ -1047,6 +1054,10 @@ class SpeculativeConfig:
                         self.target_parallel_config, self.draft_tensor_parallel_size
                     )
                 )
+        
+        if self.method != "dspark" and self.enable_adaptive_verification:
+            raise ValueError("Adaptive verification only supported with DSpark")
+            
         return self
 
     def _validate_suffix_decoding(self):

@@ -873,6 +873,15 @@ class SamplingParams(
     ) -> None:
         if speculative_config is None:
             return
+        
+        if (
+            speculative_config.enable_adaptive_verification
+            and self.num_logprobs is not None
+        ):
+            raise ValueError(
+                "Output logprobs are not supported with DSpark confidence-based "
+                "verification."
+            )
 
         # Some sampling parameters are not yet compatible with spec decoding.
         if self.min_p > _SAMPLING_EPS or self.logit_bias:
