@@ -13,6 +13,7 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
     get_paged_mqa_logits_metadata,
     has_deep_gemm,
+    native_next_n_supported
 )
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import num_compute_units
@@ -125,8 +126,11 @@ class DeepseekV32IndexerBackend(AttentionBackend):
     @classmethod
     def supports_device_cpu_query_lens_mismatch(cls) -> bool:
         # Only the varlen paged MQA logits kernel takes per-request query
-        # lengths from device tensors; otherwise the indexer needs uniform ones.
-        return _supports_varlen_paged_mqa_logits()
+        # lengths from device tensors natively. Hopper can instead flatten each
+        # query into a single-token row using device-built metadata.
+        return _supports_varlen_paged_mqa_logits() or (
+            _supports_flattened_device_query_lens()
+        )
 
     @staticmethod
     def get_name() -> str:
@@ -256,6 +260,38 @@ def _supports_varlen_paged_mqa_logits() -> bool:
     )
 
 
+def _supports_flattened_device_query_lens() -> bool:
+    return (
+        current_platform.is_cuda()
+        and current_platform.is_device_capability_family(90)
+        and has_deep_gemm()
+    )
+
+
+def _supports_native_decode(next_n: int) -> bool:
+    """Whether decode can pass `next_n` Q rows per request to the kernel
+    instead of flattening to one single-token row per query, which re-reads
+    the KV tile once per row.
+    """
+    if not (current_platform.is_cuda() and has_deep_gemm()):
+        return next_n in (1, 2)
+    if current_platform.is_device_capability_family(100):
+        return True
+    if current_platform.is_device_capability_family(90):
+        return native_next_n_supported(next_n)
+    return next_n in (1, 2)
+
+
+def _use_flattening(vllm_config: VllmConfig) -> bool:
+    speculative_config = vllm_config.speculative_config
+    next_n = 1 + vllm_config.num_speculative_tokens
+    return not _supports_native_decode(next_n) or (
+        speculative_config is not None
+        and speculative_config.enable_adaptive_verification
+        and _supports_flattened_device_query_lens()
+    )
+
+
 class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
     # The indexer opts out of the shared reorder-threshold vote (see __init__),
     # so this is None; its own split uses self.decode_threshold.
@@ -267,7 +303,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         vllm_config: VllmConfig,
         kv_cache_spec: AttentionSpec,
     ) -> AttentionCGSupport:
-        if _supports_varlen_paged_mqa_logits():
+        if _supports_varlen_paged_mqa_logits() or _use_flattening(vllm_config):
             return AttentionCGSupport.ALWAYS
         return AttentionCGSupport.UNIFORM_BATCH
 
@@ -312,14 +348,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         next_n = self.num_speculative_tokens + 1
         self.decode_threshold = next_n
         self.reorder_batch_threshold = None
-        # NOTE: SM100 datacenter GPUs support any next_n natively via the
-        # multi-atom paged MQA logits kernels (FP8 and FP4 indexer
-        # caches). Outside the SM100 family the FP8
-        # paged MQA logits kernel only supports next_n in (1, 2)
-        # (deepgemm smxx_fp8_fp4_paged_mqa_logits.hpp:233), so flatten there.
-        self.use_flattening = not current_platform.is_device_capability_family(
-            100
-        ) and next_n not in (1, 2)
+        self.use_flattening = _use_flattening(self.vllm_config)
         self.supports_varlen = _supports_varlen_paged_mqa_logits()
         logger.info_once(
             "DSA indexer decode path: use_flattening=%s supports_varlen=%s "
@@ -380,7 +409,8 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             device=self.device,
         )
 
-        # See: DeepGMM/csrc/apis/attention.hpp
+        # See: DeepGMM/csrc/apis/attention.hpp. Sized for one slot per SM;
+        # build() narrows it to whatever the kernel actually schedules.
         self.scheduler_metadata_buffer = torch.empty(
             (self.num_sms + 1, 2), dtype=torch.int32, device=self.device
         )
@@ -446,11 +476,14 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         max_decode_len: int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, bool]:
         """Prepare native or per-token flattened decode tensors."""
+        spec_config = self.vllm_config.speculative_config
+        adaptive = bool(spec_config and spec_config.enable_adaptive_verification)
         min_decode_len = int(decode_lens_cpu.min().item())
         if not use_native:
             assert self.decode_seq_lens_buffer.dim() == 1
             if (
                 not self.supports_varlen
+                and (num_decodes == 1 or not adaptive)
                 and min_decode_len == max_decode_len
                 and num_decodes * max_decode_len == num_decode_tokens
             ):
@@ -720,9 +753,16 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
             max_decode_len = int(decode_lens_cpu.max().item())
             next_n = 1 + self.num_speculative_tokens
+            # The kernel sees max_decode_len Q rows, not the configured next_n,
+            # so legality is per-step: on SM90 a uniformly 3-deep batch has no
+            # native kernel. max_decode_len <= 1 always has one.
+            step_next_n_ok = max_decode_len <= 1 or _supports_native_decode(
+                max_decode_len
+            )
             use_native = (
                 not (self.use_flattening or self.supports_varlen)
                 and max_decode_len <= next_n
+                and step_next_n_ok
             )
 
             global_seq_lens_for_decode = self._prepare_global_decode_seq_lens(
@@ -788,20 +828,23 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 seq_lens = seq_lens.unsqueeze(-1)
 
             # DeepGEMM is required for the paged MQA logits on CUDA devices
+            schedule_metadata = self.scheduler_metadata_buffer
             if current_platform.is_cuda() and has_deep_gemm():
-                self.scheduler_metadata_buffer[:] = get_paged_mqa_logits_metadata(
+                metadata = get_paged_mqa_logits_metadata(
                     seq_lens,
                     self.kv_cache_spec.storage_block_size,
                     self.num_sms,
                     indices=decode_indices,
                 )
+                schedule_metadata = self.scheduler_metadata_buffer[: metadata.shape[0]]
+                schedule_metadata[:] = metadata
 
             decode_metadata = DeepSeekV32IndexerDecodeMetadata(
                 block_table=block_table,
                 seq_lens=seq_lens,
                 decode_lens=decode_lens,
                 requires_padding=requires_padding,
-                schedule_metadata=self.scheduler_metadata_buffer,
+                schedule_metadata=schedule_metadata,
                 indices=decode_indices,
                 global_seq_lens=global_seq_lens_for_decode,
             )
