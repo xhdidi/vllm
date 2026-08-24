@@ -783,11 +783,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.speculator is not None:
                 self.speculator.capture()
             if self.adaptive_verification is not None:
+                all_batches = list(self.adaptive_verification.batches_to_profile(
+                    self.cudagraph_manager.captured_token_counts()
+                ))
+                groups = {}
+                for batch in all_batches:
+                    num_tokens = batch["num_tokens"]
+                    groups.setdefault(num_tokens, []).append(batch)
+
+                for num_tokens, group in groups.items():
+                    self._dummy_run(**group[0])   # 预热，不计时
+                
                 with self.step_timing.collect() as timings:
-                    for batch in self.adaptive_verification.batches_to_profile(
-                        self.cudagraph_manager.captured_token_counts()
-                    ):
-                        self._dummy_run(**batch)
+                    for group in groups.values():
+                        for batch in group:
+                            self._dummy_run(**batch)
+                logger.info_once(f"DSpark cost tables: {timings}")
                 self.adaptive_verification.set_initial_cost_curves(timings)
 
         end_time = time.perf_counter()

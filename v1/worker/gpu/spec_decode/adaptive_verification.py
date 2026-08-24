@@ -22,7 +22,7 @@ from vllm.v1.worker.gpu.attn_utils import (
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 
 logger = init_logger(__name__)
-_PROFILE_REPLAYS = 5
+_PROFILE_REPLAYS = 8
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.attn_utils import AttentionCGSupportInfo
@@ -231,7 +231,6 @@ class AdaptiveVerificationManager:
             self.req_states.max_num_batched_tokens,
             self._cudagraph_limit,
         )
-        logger.debug("DSpark cost tables: %s", self.cost_tables)
 
     def record_confidences(
         self,
@@ -297,7 +296,7 @@ class AdaptiveVerificationManager:
         max_draft_budget = min(
             int(scheduled_drafts.sum()),
             max(0, self._max_total_logits - num_reqs * self.num_bonus_tokens),
-        )
+        )  # 确保不超出 max_num_batched_tokens
         scores = scores[:max_draft_budget]
         draft_cost_ms, verify_cost_ms = self.cost_tables
         num_sampling_requests = np.count_nonzero(
@@ -306,7 +305,7 @@ class AdaptiveVerificationManager:
         )
         num_tokens_to_estimated_accepted_tokens = np.concatenate(
             ([num_sampling_requests], num_sampling_requests + np.cumsum(scores))
-        )
+        )  # budget 对应的接受长度期望，其中 num_sampling_requests 为 budget=0 时的接受长度（每条请求一个token）
         costs = (
             draft_cost_ms[len(req_ids)]
             + verify_cost_ms[
@@ -314,7 +313,7 @@ class AdaptiveVerificationManager:
                 + max_draft_budget
                 + 1
             ]
-        )
+        )  # 总时间成本 = 起草成本（固定值） + 校验成本（根据budget索引）
         num_drafts_per_req = {
             req_id: int(num_drafts)
             for req_id, num_drafts in zip(req_ids, scheduled_drafts, strict=True)
@@ -324,6 +323,7 @@ class AdaptiveVerificationManager:
             for req_id, num_tokens in zip(req_ids, num_non_draft_tokens, strict=True)
         }
         draft_budget = int(np.argmax(num_tokens_to_estimated_accepted_tokens / costs))
+        # 接收长度期望 / 总时间成本
         self._batch_budget = (
             num_drafts_per_req,
             num_non_draft_tokens_per_req,
@@ -350,6 +350,10 @@ class AdaptiveVerificationManager:
         if draft_budget == num_drafts:
             return num_scheduled_tokens, cu_num_logits_np
 
+        # is_verification_request = num_draft_tokens_per_req > 0
+        # num_verification_reqs = int(is_verification_request.sum())
+        # logger.info_once(f'Adaptive_verification Metrics: is_verification_request: {is_verification_request}, num_verification_reqs: {num_verification_reqs}, draft_budget: {draft_budget}')
+
         num_non_draft_tokens = num_scheduled_tokens - num_draft_tokens_per_req
         if draft_budget == 0:
             # The draft budget is 0, so we can know cu_num_logits_np exactly. This helps
@@ -366,6 +370,7 @@ class AdaptiveVerificationManager:
         # sort_batch_req_ids keeps verification requests at the front.
         assert np.all(is_verification_request[:num_verification_reqs])
         # for the CPU side buffer we distribute draft tokens evenly
+        '''将预算均匀分配给需要验证的请求'''
         draft_lens_cpu = np.zeros_like(num_non_draft_tokens)
         draft_lens_cpu[:num_verification_reqs] = draft_budget // num_verification_reqs
         draft_lens_cpu[: draft_budget % num_verification_reqs] += 1
