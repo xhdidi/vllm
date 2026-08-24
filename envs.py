@@ -1054,7 +1054,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # attention over a much larger KV cache than the default assumes.
     # Clamped to max_model_len - query_len. Default: 8192 tokens
     "VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN": lambda: int(
-        os.getenv("VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN", "8192")
+        os.getenv("VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN", "16384")
     ),
     # If set, the OpenAI API server will stay alive even after the underlying
     # AsyncLLMEngine errors and stops serving requests
